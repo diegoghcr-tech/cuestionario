@@ -53,6 +53,7 @@ h2{margin:6px 0 0;font:600 1.6rem/1.25 Georgia,serif}
 .chips{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px}
 .chip{min-height:48px;padding:0;background:var(--card);border:2px solid var(--line);font-weight:650;font-variant-numeric:tabular-nums}
 .chip.ok{background:var(--teal);border-color:var(--teal);color:#fff}
+.wide{width:100%}
 .big{background:var(--teal);color:#fff;font-size:1.2rem;font-weight:700;min-height:68px;width:100%}
 .big:active:not(:disabled){background:var(--tealD)}
 textarea{width:100%;min-height:50vh;min-height:52dvh;border:2px solid var(--line);border-radius:14px;padding:12px;font:inherit;background:var(--card);color:var(--ink);resize:vertical}
@@ -156,7 +157,9 @@ function idbLoad(){return new Promise(function(res){
 /* ---------- grabación ---------- */
 function pickMime(){
   if(!window.MediaRecorder||!MediaRecorder.isTypeSupported)return '';
-  var c=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
+  var ua=navigator.userAgent||'';
+  var apple=/iPhone|iPad|iPod/.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1);
+  var c=apple?['audio/mp4','audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus']:['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
   for(var i=0;i<c.length;i++){if(MediaRecorder.isTypeSupported(c[i]))return c[i]}
   return '';
 }
@@ -181,7 +184,8 @@ function startRec(){
       if(!r.discard&&r.chunks.length){
         var type=r.mr.mimeType||mime||'audio/webm';
         var v={blob:new Blob(r.chunks,{type:type}),dur:((r.t1||Date.now())-r.t0)/1000,mime:type};
-        recs[r.i]=v;idbOp('readwrite',function(st){st.put(v,r.i)});
+        if(v.blob.size<1500){setMsg('La grabación salió vacía. Toca Grabar e inténtalo otra vez.',true)}
+        else{recs[r.i]=v;idbOp('readwrite',function(st){st.put(v,r.i)})}
       }
       refresh();
     };
@@ -333,10 +337,11 @@ function renderEnd(){
     '<p class="hint">Toca una pregunta para volver a ella. Las grabadas van en verde azulado.</p>'+
     '<div class="chips">'+h+'</div>'+
     '<p class="status" id="zs" role="status"></p>'+
-    '<button class="big" id="dl"></button>'+
+    '<button class="big" id="dl"></button>'+'<button class="sec wide" id="sh" style="display:none"></button>'+
     '<button class="link" id="reset">Borrar todo y empezar de nuevo</button>';
   var d=$('#dl');d.textContent=zipping?'Preparando .zip…':'Descargar todo';d.disabled=!a||zipping;
   d.onclick=downloadAll;
+  if(a&&typeof JSZip!=='undefined'){getZip();paintShare()}
   $('#reset').onclick=resetAll;
   Array.prototype.forEach.call(m.querySelectorAll('.chip'),function(c){c.onclick=function(){go(+c.dataset.i)}});
   $('#nav').innerHTML='<button class="back full" id="bk">Atrás</button>';
@@ -376,21 +381,49 @@ function saveBlob(blob,name){
     setTimeout(function(){URL.revokeObjectURL(u)},4000);
   });
 }
-function downloadAll(){
-  if(zipping||typeof JSZip==='undefined'){return}
-  zipping=true;renderEnd();
+var zipCache=null;
+function zipSig(){var s=[];for(var i=0;i<qs.length;i++)if(recs[i])s.push(i+':'+recs[i].blob.size);return qs.length+'#'+s.join('|')}
+function zipName(){var d=new Date(),p=function(x){return String(x).padStart(2,'0')};return 'respuestas-'+d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'.zip'}
+function getZip(){
+  var sig=zipSig();
+  if(zipCache&&zipCache.sig===sig)return zipCache.p;
   var zip=new JSZip(),lista=[];
   for(var i=0;i<qs.length;i++){
     lista.push('P'+(i+1)+': '+qs[i]);
     if(recs[i])zip.file('P'+(i+1)+'.'+extOf(recs[i].mime),recs[i].blob);
   }
   zip.file('preguntas.txt',lista.join('\n'));
-  zip.generateAsync({type:'blob',compression:'STORE'}).then(function(blob){
-    var d=new Date(),p=function(x){return String(x).padStart(2,'0')};
-    var name='respuestas-'+d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'.zip';
-    return saveBlob(blob,name).then(function(){zipping=false;renderEnd()});
+  var p=zip.generateAsync({type:'blob',compression:'STORE'});
+  var c={sig:sig,p:p,blob:null};zipCache=c;
+  p.then(function(b){c.blob=b;if(zipCache===c)paintShare()},function(){if(zipCache===c)zipCache=null});
+  return p;
+}
+function paintShare(){
+  var b=$('#sh');if(!b||screen!=='end')return;
+  if(!(navigator.share&&navigator.canShare&&window.File)){b.style.display='none';return}
+  if(!zipCache||!zipCache.blob){
+    if(answered()){b.style.display='block';b.disabled=true;b.textContent='Preparando para compartir…'}
+    return;
+  }
+  var f;try{f=new File([zipCache.blob],zipName(),{type:'application/zip'})}catch(e){b.style.display='none';return}
+  var ok=false;try{ok=navigator.canShare({files:[f]})}catch(e){}
+  if(!ok){b.style.display='none';return}
+  b.style.display='block';b.disabled=false;b.textContent='Compartir .zip (WhatsApp, Archivos…)';
+  b.onclick=function(){
+    navigator.share({files:[f],title:'Respuestas del cuestionario'}).catch(function(e){
+      if(e&&e.name==='AbortError')return;
+      var z=$('#zs');if(z){z.textContent='No se pudo abrir el menú de compartir. Usa Descargar todo.';z.className='status err'}
+    });
+  };
+}
+function downloadAll(){
+  if(zipping||typeof JSZip==='undefined'){return}
+  zipping=true;renderEnd();
+  getZip().then(function(blob){
+    return saveBlob(blob,zipName()).then(function(){zipping=false;renderEnd()});
   }).catch(function(e){
-    zipping=false;renderEnd();if(e&&e.code==='declined')return;$('#zs').textContent='No se pudo crear el .zip. Intenta otra vez.';$('#zs').className='status err';
+    zipping=false;renderEnd();if(e&&e.code==='declined')return;
+    var z=$('#zs');if(z){z.textContent='No se pudo crear el .zip. Intenta otra vez.';z.className='status err'}
   });
 }
 
